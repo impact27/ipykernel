@@ -71,10 +71,6 @@ class Comm(LoggingConfigurable):
             buffers=buffers,
         )
 
-    def __del__(self):
-        """trigger close on gc"""
-        self.close()
-
     # publishing messages
 
     def open(self, data=None, metadata=None, buffers=None):
