@@ -13,6 +13,7 @@ from signal import signal, default_int_handler, SIGINT
 import sys
 import time
 import uuid
+import threading
 
 try:
     # jupyter_client >= 5, use tz-aware now
@@ -40,6 +41,7 @@ from traitlets import (
 from jupyter_client.session import Session
 
 from ._version import kernel_protocol_version
+
 
 CONTROL_PRIORITY = 1
 SHELL_PRIORITY = 10
@@ -860,6 +862,7 @@ class Kernel(SingletonConfigurable):
         )
 
     def _input_request(self, prompt, ident, parent, password=False):
+        """Send an input request to the frontend and wait for the reply."""
         # Flush output before making the request.
         sys.stderr.flush()
         sys.stdout.flush()
@@ -877,18 +880,9 @@ class Kernel(SingletonConfigurable):
         content = json_clean(dict(prompt=prompt, password=password))
         self.session.send(self.stdin_socket, u'input_request', content, parent,
                           ident=ident)
-
         # Await a response.
-        while True:
-            try:
-                ident, reply = self.session.recv(self.stdin_socket, 0)
-            except Exception:
-                self.log.warning("Invalid Message:", exc_info=True)
-            except KeyboardInterrupt:
-                # re-raise KeyboardInterrupt, to truncate traceback
-                raise KeyboardInterrupt
-            else:
-                break
+        reply = self._wait_input_request_reply()
+
         try:
             value = py3compat.unicode_to_str(reply['content']['value'])
         except:
@@ -898,6 +892,45 @@ class Kernel(SingletonConfigurable):
             # EOF
             raise EOFError
         return value
+
+    def _wait_input_request_reply(self):
+        """Wait for an input request reply.
+
+        Raises
+        ------
+        KeyboardInterrupt if a keyboard interrupt is recieved.
+        """
+        # Await a response.
+        reply = None
+        while reply is None:
+            try:
+                ident, reply = self.session.recv(
+                    self.stdin_socket, zmq.NOBLOCK)
+                if not reply:
+                    time.sleep(0.01)
+                    self._input_request_loop_step()
+            except Exception:
+                self.log.warning("Invalid Message:", exc_info=True)
+            except KeyboardInterrupt:
+                # re-raise KeyboardInterrupt, to truncate traceback
+                raise KeyboardInterrupt
+        return reply
+
+    def _input_request_loop_step(self):
+        """Do one step of the input request loop."""
+        # Allow matplotlib figures using GUI frameworks (e.g. qt, wx, gtk, tk)
+        # to update
+        if sys.version_info >= (3, 4):
+            is_main_thread = (threading.current_thread() is
+                              threading.main_thread())
+        else:
+            is_main_thread = isinstance(threading.current_thread(),
+                                        threading._MainThread)
+        if is_main_thread and 'matplotlib.pyplot' in sys.modules:
+            # matplotlib needs to be imported after app.launch_new_instance()
+            import matplotlib.pyplot as plt
+            if plt.get_fignums():
+                plt.gcf().canvas.flush_events()
 
     def _at_shutdown(self):
         """Actions taken at shutdown by the kernel, called by python's atexit.
